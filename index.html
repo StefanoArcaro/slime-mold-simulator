@@ -193,6 +193,11 @@ if (!floatLinear) {
   console.warn('OES_texture_float_linear not available — display may use nearest filtering');
 }
 
+const floatBlend = gl.getExtension('EXT_float_blend');
+if (!floatBlend) {
+  console.warn('EXT_float_blend not available — trail deposit may not work correctly');
+}
+
 // ─── Shared Vertex Shader ───────────────────────────────────────────────
 const vertSrc = `#version 300 es
 in vec2 a_position;
@@ -203,25 +208,82 @@ void main() {
 }
 `;
 
-// ─── Agent Pass-Through Shader ──────────────────────────────────────────
+// ─── Agent Movement Shader ──────────────────────────────────────────────
 const agentFragSrc = `#version 300 es
 precision highp float;
 uniform sampler2D u_agentTex;
+uniform sampler2D u_trailTex;
+uniform float u_sensorAngle;
+uniform float u_sensorDistance;
+uniform float u_turnSpeed;
+uniform float u_simSize;
+uniform float u_frame;
 in vec2 v_uv;
 out vec4 fragColor;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main() {
-  fragColor = texelFetch(u_agentTex, ivec2(gl_FragCoord.xy), 0);
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  vec4 agent = texelFetch(u_agentTex, coord, 0);
+  vec2 pos = agent.xy;
+  float heading = agent.z;
+
+  // Sensor positions
+  vec2 sC = pos + vec2(cos(heading), sin(heading)) * u_sensorDistance;
+  vec2 sL = pos + vec2(cos(heading + u_sensorAngle), sin(heading + u_sensorAngle)) * u_sensorDistance;
+  vec2 sR = pos + vec2(cos(heading - u_sensorAngle), sin(heading - u_sensorAngle)) * u_sensorDistance;
+
+  // Sample trail at sensor positions (wrap toroidally)
+  float fC = texelFetch(u_trailTex, ivec2(mod(sC, u_simSize)), 0).r;
+  float fL = texelFetch(u_trailTex, ivec2(mod(sL, u_simSize)), 0).r;
+  float fR = texelFetch(u_trailTex, ivec2(mod(sR, u_simSize)), 0).r;
+
+  // Steer (Jones model)
+  if (fC >= fL && fC >= fR) {
+    // center strongest — go straight
+  } else if (fC < fL && fC < fR) {
+    // center weakest — random turn
+    float r = hash(pos + u_frame);
+    heading += (r < 0.5 ? -1.0 : 1.0) * u_turnSpeed;
+  } else if (fL > fR) {
+    heading += u_turnSpeed;
+  } else {
+    heading -= u_turnSpeed;
+  }
+
+  // Move forward
+  pos += vec2(cos(heading), sin(heading));
+  pos = mod(pos, u_simSize);
+
+  fragColor = vec4(pos, heading, 1.0);
 }
 `;
 
-// ─── Trail Pass-Through Shader ──────────────────────────────────────────
+// ─── Trail Diffuse + Decay Shader ───────────────────────────────────────
 const trailFragSrc = `#version 300 es
 precision highp float;
 uniform sampler2D u_trailTex;
+uniform float u_decayRate;
+uniform float u_diffuseStrength;
 in vec2 v_uv;
 out vec4 fragColor;
 void main() {
-  fragColor = texelFetch(u_trailTex, ivec2(gl_FragCoord.xy), 0);
+  ivec2 coord = ivec2(gl_FragCoord.xy);
+  ivec2 texSize = textureSize(u_trailTex, 0);
+
+  float sum = 0.0;
+  for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+      sum += texelFetch(u_trailTex, (coord + ivec2(dx, dy) + texSize) % texSize, 0).r;
+  float blurred = sum / 9.0;
+
+  float original = texelFetch(u_trailTex, coord, 0).r;
+  float result = mix(original, blurred, u_diffuseStrength) * u_decayRate;
+
+  fragColor = vec4(result, 0.0, 0.0, 1.0);
 }
 `;
 
@@ -262,14 +324,51 @@ void main() {
 }
 `;
 
+// ─── Deposit Vertex Shader ──────────────────────────────────────────────
+const depositVertSrc = `#version 300 es
+in vec2 a_index;
+uniform sampler2D u_agentTex;
+uniform float u_simSize;
+void main() {
+  vec4 agent = texelFetch(u_agentTex, ivec2(a_index), 0);
+  vec2 clipPos = (agent.xy / u_simSize) * 2.0 - 1.0;
+  gl_Position = vec4(clipPos, 0.0, 1.0);
+  gl_PointSize = 1.0;
+}
+`;
+
+// ─── Deposit Fragment Shader ────────────────────────────────────────────
+const depositFragSrc = `#version 300 es
+precision highp float;
+uniform float u_depositAmount;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(u_depositAmount, 0.0, 0.0, 1.0);
+}
+`;
+
 // ─── Programs ───────────────────────────────────────────────────────────
 const agentProgInfo   = twgl.createProgramInfo(gl, [vertSrc, agentFragSrc]);
 const trailProgInfo   = twgl.createProgramInfo(gl, [vertSrc, trailFragSrc]);
 const displayProgInfo = twgl.createProgramInfo(gl, [vertSrc, displayFragSrc]);
+const depositProgInfo = twgl.createProgramInfo(gl, [depositVertSrc, depositFragSrc]);
 
 // ─── Quad Geometry ──────────────────────────────────────────────────────
 const quadBufferInfo = twgl.createBufferInfoFromArrays(gl, {
   a_position: { numComponents: 2, data: [-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1] },
+});
+
+// ─── Agent Point Buffer (for deposit pass) ──────────────────────────────
+const numAgents = SIM_SIZE * SIM_SIZE;
+const agentIndexData = new Float32Array(numAgents * 2);
+for (let y = 0; y < SIM_SIZE; y++)
+  for (let x = 0; x < SIM_SIZE; x++) {
+    const i = (y * SIM_SIZE + x) * 2;
+    agentIndexData[i] = x;
+    agentIndexData[i + 1] = y;
+  }
+const agentPointBufferInfo = twgl.createBufferInfoFromArrays(gl, {
+  a_index: { numComponents: 2, data: agentIndexData },
 });
 
 // ─── Initialize Agent Data ──────────────────────────────────────────────
@@ -432,34 +531,56 @@ function getUniforms() {
 }
 
 // ─── Render Loop ────────────────────────────────────────────────────────
-function frame() {
-  const uniforms = getUniforms();
-  const read = pingPong;
-  const write = 1 - pingPong;
+let frameCount = 0;
 
-  // Pass 1: Agent pass — read agentTex[read] -> write agentTex[write]
+function frame() {
+  const u = getUniforms();
+  const read = pingPong, write = 1 - pingPong;
+  frameCount++;
+
+  // 1. Agent update — sense trail, steer, move
   gl.useProgram(agentProgInfo.program);
   twgl.setBuffersAndAttributes(gl, agentProgInfo, quadBufferInfo);
-  twgl.setUniforms(agentProgInfo, { u_agentTex: agentTex[read] });
+  twgl.setUniforms(agentProgInfo, {
+    u_agentTex: agentTex[read], u_trailTex: trailTex[read],
+    u_sensorAngle: u.sensorAngle, u_sensorDistance: u.sensorDistance,
+    u_turnSpeed: u.turnSpeed, u_simSize: SIM_SIZE, u_frame: frameCount,
+  });
   twgl.bindFramebufferInfo(gl, agentFbo[write]);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-  // Pass 2: Trail pass — read trailTex[read] -> write trailTex[write]
+  // 2. Trail deposit — GL_POINTS, additive blend into trailTex[read]
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(depositProgInfo.program);
+  twgl.setBuffersAndAttributes(gl, depositProgInfo, agentPointBufferInfo);
+  twgl.setUniforms(depositProgInfo, {
+    u_agentTex: agentTex[write], u_simSize: SIM_SIZE,
+    u_depositAmount: u.depositAmount,
+  });
+  twgl.bindFramebufferInfo(gl, trailFbo[read]);
+  gl.drawArrays(gl.POINTS, 0, SIM_SIZE * SIM_SIZE);
+  gl.disable(gl.BLEND);
+
+  // 3. Trail diffuse + decay
   gl.useProgram(trailProgInfo.program);
   twgl.setBuffersAndAttributes(gl, trailProgInfo, quadBufferInfo);
-  twgl.setUniforms(trailProgInfo, { u_trailTex: trailTex[read] });
+  twgl.setUniforms(trailProgInfo, {
+    u_trailTex: trailTex[read],
+    u_decayRate: u.decayRate, u_diffuseStrength: u.diffuseStrength,
+  });
   twgl.bindFramebufferInfo(gl, trailFbo[write]);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
   // Swap ping-pong
   pingPong = write;
 
-  // Pass 3: Display — read trailTex[pingPong] (just written) -> screen
+  // 4. Display — render trail to screen
   gl.useProgram(displayProgInfo.program);
   twgl.setBuffersAndAttributes(gl, displayProgInfo, quadBufferInfo);
   twgl.setUniforms(displayProgInfo, {
     u_trailTex: trailTex[pingPong],
-    u_colorTheme: uniforms.colorTheme,
+    u_colorTheme: u.colorTheme,
     u_simSize: [SIM_SIZE, SIM_SIZE],
   });
   twgl.bindFramebufferInfo(gl, null);
