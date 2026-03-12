@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slime Mold Simulator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  #panel {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    background: rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 12px;
+    color: #ccc;
+    min-width: 220px;
+    user-select: none;
+  }
+
+  #panel h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 12px;
+    letter-spacing: 0.5px;
+  }
+
+  .slider-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .slider-row label {
+    flex: 0 0 auto;
+    margin-right: 8px;
+  }
+
+  .slider-row input[type="range"] {
+    flex: 1;
+    min-width: 80px;
+    accent-color: #e8c840;
+  }
+
+  .slider-row .val {
+    flex: 0 0 36px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: #e8c840;
+  }
+
+  .select-row {
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .select-row select {
+    background: #1a1a1a;
+    color: #ccc;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    padding: 2px 4px;
+    font-family: inherit;
+    font-size: 11px;
+  }
+
+  #resetBtn {
+    width: 100%;
+    margin-top: 8px;
+    padding: 6px 0;
+    background: rgba(232, 200, 64, 0.15);
+    border: 1px solid rgba(232, 200, 64, 0.4);
+    border-radius: 4px;
+    color: #e8c840;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #resetBtn:hover { background: rgba(232, 200, 64, 0.3); }
+
+  #error-msg {
+    color: red;
+    padding: 2em;
+    font-family: monospace;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<p id="error-msg"></p>
+<canvas id="canvas"></canvas>
+
+<div id="panel">
+  <h2>Physarum</h2>
+
+  <div class="slider-row">
+    <label>sensorAngle</label>
+    <input type="range" id="sensorAngle" min="0.1" max="1.5" step="0.01" value="0.6">
+    <span class="val" id="sensorAngle_v">0.60</span>
+  </div>
+  <div class="slider-row">
+    <label>sensorDist</label>
+    <input type="range" id="sensorDistance" min="1" max="50" step="1" value="20">
+    <span class="val" id="sensorDistance_v">20</span>
+  </div>
+  <div class="slider-row">
+    <label>turnSpeed</label>
+    <input type="range" id="turnSpeed" min="0.01" max="1.0" step="0.01" value="0.3">
+    <span class="val" id="turnSpeed_v">0.30</span>
+  </div>
+  <div class="slider-row">
+    <label>deposit</label>
+    <input type="range" id="depositAmount" min="0.1" max="5.0" step="0.1" value="1.0">
+    <span class="val" id="depositAmount_v">1.0</span>
+  </div>
+  <div class="slider-row">
+    <label>decay</label>
+    <input type="range" id="decayRate" min="0.9" max="1.0" step="0.001" value="0.98">
+    <span class="val" id="decayRate_v">0.980</span>
+  </div>
+  <div class="slider-row">
+    <label>diffuse</label>
+    <input type="range" id="diffuseStrength" min="0.0" max="1.0" step="0.01" value="0.5">
+    <span class="val" id="diffuseStrength_v">0.50</span>
+  </div>
+
+  <div class="select-row">
+    <label>spawn</label>
+    <select id="spawnPattern">
+      <option value="random">random</option>
+      <option value="circle">circle</option>
+      <option value="center">center</option>
+    </select>
+  </div>
+
+  <div class="select-row">
+    <label>theme</label>
+    <select id="colorTheme">
+      <option value="classic">classic (yellow)</option>
+      <option value="bioluminescent">bioluminescent</option>
+      <option value="fire">fire</option>
+      <option value="green">green</option>
+    </select>
+  </div>
+
+  <button type="button" id="resetBtn">Reset</button>
+</div>
+
+<script>
+// ─── Constants ──────────────────────────────────────────────────────────
+const SIM_SIZE = 1024;
+
+// ─── Error display helper ───────────────────────────────────────────────
+function showError(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+  document.getElementById('canvas').style.display = 'none';
+  document.getElementById('panel').style.display = 'none';
+}
+
+// ─── WebGL2 Context ─────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const gl = canvas.getContext('webgl2');
+if (!gl) {
+  showError('WebGL2 is not supported in this browser.');
+  throw new Error('WebGL2 not supported');
+}
+
+const ext = gl.getExtension('EXT_color_buffer_float');
+if (!ext) {
+  showError('EXT_color_buffer_float not supported.');
+  throw new Error('EXT_color_buffer_float not supported');
+}
+
+// Required for texture() with LINEAR filtering on RGBA32F textures.
+// Without this, float textures are "incomplete" and texture() returns (0,0,0,1).
+const floatLinear = gl.getExtension('OES_texture_float_linear');
+if (!floatLinear) {
+  console.warn('OES_texture_float_linear not available — display may use nearest filtering');
+}
+
+// ─── Utility: Compile Shader Program ────────────────────────────────────
+function createShaderProgram(vertSrc, fragSrc) {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, vertSrc);
+  gl.compileShader(vs);
+  if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+    console.error('Vertex shader error:', gl.getShaderInfoLog(vs));
+    gl.deleteShader(vs);
+    return null;
+  }
+
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, fragSrc);
+  gl.compileShader(fs);
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+    console.error('Fragment shader error:', gl.getShaderInfoLog(fs));
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return null;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error('Link error:', gl.getProgramInfoLog(prog));
+    gl.deleteProgram(prog);
+    return null;
+  }
+
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  return prog;
+}
+
+// ─── Utility: Create Float Texture ──────────────────────────────────────
+function createTexture(width, height, data, filter) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.RGBA32F,
+    width, height, 0,
+    gl.RGBA, gl.FLOAT,
+    data
+  );
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+// ─── Utility: Create Framebuffer ────────────────────────────────────────
+function createFramebuffer(texture) {
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if (status !== gl.FRAMEBUFFER_COMPLETE) {
+    console.error('Framebuffer incomplete:', status);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return fbo;
+}
+
+// ─── Full-Screen Quad ───────────────────────────────────────────────────
+const quadVerts = new Float32Array([
+  -1, -1,   1, -1,   -1,  1,
+  -1,  1,   1, -1,    1,  1,
+]);
+const quadVBO = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
+gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+
+function bindQuad(program) {
+  const loc = gl.getAttribLocation(program, 'a_position');
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+}
+
+// ─── Shared Vertex Shader ───────────────────────────────────────────────
+const vertSrc = `#version 300 es
+in vec2 a_position;
+out vec2 v_uv;
+void main() {
+  v_uv = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+// ─── Agent Pass-Through Shader ──────────────────────────────────────────
+const agentFragSrc = `#version 300 es
+precision highp float;
+uniform sampler2D u_agentTex;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  fragColor = texelFetch(u_agentTex, ivec2(gl_FragCoord.xy), 0);
+}
+`;
+
+// ─── Trail Pass-Through Shader ──────────────────────────────────────────
+const trailFragSrc = `#version 300 es
+precision highp float;
+uniform sampler2D u_trailTex;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  fragColor = texelFetch(u_trailTex, ivec2(gl_FragCoord.xy), 0);
+}
+`;
+
+// ─── Display Shader ─────────────────────────────────────────────────────
+// Uses texelFetch (not texture()) to avoid needing OES_texture_float_linear.
+// We convert screen UVs to sim-resolution texel coordinates manually.
+const displayFragSrc = `#version 300 es
+precision highp float;
+uniform sampler2D u_trailTex;
+uniform int u_colorTheme;
+uniform vec2 u_simSize;
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+  ivec2 texCoord = ivec2(v_uv * u_simSize);
+  texCoord = clamp(texCoord, ivec2(0), ivec2(u_simSize) - 1);
+  float t = texelFetch(u_trailTex, texCoord, 0).r;
+  t = clamp(t, 0.0, 1.0);
+
+  vec3 col;
+  if (u_colorTheme == 0) {
+    // classic: black -> yellow
+    col = mix(vec3(0.0), vec3(0.91, 0.78, 0.25), t);
+  } else if (u_colorTheme == 1) {
+    // bioluminescent: dark blue -> cyan
+    col = mix(vec3(0.0, 0.02, 0.08), vec3(0.1, 0.8, 1.0), t);
+  } else if (u_colorTheme == 2) {
+    // fire: black -> red -> orange -> yellow
+    col = mix(vec3(0.0), vec3(1.0, 0.2, 0.0), clamp(t * 2.0, 0.0, 1.0));
+    col = mix(col, vec3(1.0, 0.9, 0.3), clamp(t * 2.0 - 1.0, 0.0, 1.0));
+  } else {
+    // green: black -> green
+    col = mix(vec3(0.0), vec3(0.2, 1.0, 0.3), t);
+  }
+
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+// ─── Compile Programs ───────────────────────────────────────────────────
+const agentProg   = createShaderProgram(vertSrc, agentFragSrc);
+const trailProg   = createShaderProgram(vertSrc, trailFragSrc);
+const displayProg = createShaderProgram(vertSrc, displayFragSrc);
+
+// ─── Initialize Agent Data ──────────────────────────────────────────────
+function generateAgentData(pattern) {
+  const data = new Float32Array(SIM_SIZE * SIM_SIZE * 4);
+  for (let i = 0; i < SIM_SIZE * SIM_SIZE; i++) {
+    const idx = i * 4;
+    let x, y;
+
+    if (pattern === 'circle') {
+      const angle = Math.random() * Math.PI * 2;
+      const radius = SIM_SIZE * 0.3;
+      x = SIM_SIZE / 2 + Math.cos(angle) * radius;
+      y = SIM_SIZE / 2 + Math.sin(angle) * radius;
+    } else if (pattern === 'center') {
+      const spread = SIM_SIZE * 0.02;
+      x = SIM_SIZE / 2 + (Math.random() - 0.5) * spread;
+      y = SIM_SIZE / 2 + (Math.random() - 0.5) * spread;
+    } else {
+      // random
+      x = Math.random() * SIM_SIZE;
+      y = Math.random() * SIM_SIZE;
+    }
+
+    data[idx]     = x;                            // position x
+    data[idx + 1] = y;                            // position y
+    data[idx + 2] = Math.random() * Math.PI * 2;  // heading
+    data[idx + 3] = 1.0;                          // alive
+  }
+  return data;
+}
+
+// ─── Initialize Trail Data (with test seed) ─────────────────────────────
+function generateTrailData() {
+  const data = new Float32Array(SIM_SIZE * SIM_SIZE * 4);
+
+  // Seed test data: a ring at a random radius + random bright spots
+  const cx = SIM_SIZE / 2;
+  const cy = SIM_SIZE / 2;
+  const ringRadius = SIM_SIZE * (0.1 + Math.random() * 0.25);
+
+  for (let y = 0; y < SIM_SIZE; y++) {
+    for (let x = 0; x < SIM_SIZE; x++) {
+      const idx = (y * SIM_SIZE + x) * 4;
+      const dx = x - cx;
+      const dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      const ring = Math.max(0, 1.0 - Math.abs(dist - ringRadius) / 15);
+      data[idx] = ring;
+    }
+  }
+
+  // Scatter random bright spots so each reset looks visibly different
+  const numSpots = 200 + Math.floor(Math.random() * 300);
+  for (let s = 0; s < numSpots; s++) {
+    const sx = Math.floor(Math.random() * SIM_SIZE);
+    const sy = Math.floor(Math.random() * SIM_SIZE);
+    const radius = 3 + Math.random() * 8;
+    for (let dy = -Math.ceil(radius); dy <= Math.ceil(radius); dy++) {
+      for (let dx = -Math.ceil(radius); dx <= Math.ceil(radius); dx++) {
+        const px = sx + dx;
+        const py = sy + dy;
+        if (px < 0 || px >= SIM_SIZE || py < 0 || py >= SIM_SIZE) continue;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > radius) continue;
+        const idx = (py * SIM_SIZE + px) * 4;
+        data[idx] = Math.max(data[idx], 1.0 - d / radius);
+      }
+    }
+  }
+  return data;
+}
+
+// ─── Create Texture Pairs ───────────────────────────────────────────────
+let agentTex = [null, null];
+let agentFbo = [null, null];
+let trailTex = [null, null];
+let trailFbo = [null, null];
+let pingPong = 0;
+
+function initTextures() {
+  for (let i = 0; i < 2; i++) {
+    if (agentTex[i]) gl.deleteTexture(agentTex[i]);
+    if (agentFbo[i]) gl.deleteFramebuffer(agentFbo[i]);
+    if (trailTex[i]) gl.deleteTexture(trailTex[i]);
+    if (trailFbo[i]) gl.deleteFramebuffer(trailFbo[i]);
+  }
+
+  const pattern = document.getElementById('spawnPattern').value;
+  const agentData = generateAgentData(pattern);
+  const trailData = generateTrailData();
+
+  for (let i = 0; i < 2; i++) {
+    agentTex[i] = createTexture(SIM_SIZE, SIM_SIZE, i === 0 ? agentData : null, gl.NEAREST);
+    agentFbo[i] = createFramebuffer(agentTex[i]);
+    trailTex[i] = createTexture(SIM_SIZE, SIM_SIZE, i === 0 ? trailData : null, gl.LINEAR);
+    trailFbo[i] = createFramebuffer(trailTex[i]);
+  }
+
+  pingPong = 0;
+}
+
+initTextures();
+
+// ─── Canvas Resize ──────────────────────────────────────────────────────
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ─── UI Wiring ──────────────────────────────────────────────────────────
+const sliderIds = ['sensorAngle', 'sensorDistance', 'turnSpeed', 'depositAmount', 'decayRate', 'diffuseStrength'];
+
+sliderIds.forEach(id => {
+  const slider = document.getElementById(id);
+  const display = document.getElementById(id + '_v');
+  slider.addEventListener('input', () => {
+    display.textContent = parseFloat(slider.value).toFixed(
+      slider.step.includes('.') ? slider.step.split('.')[1].length : 0
+    );
+  });
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  initTextures();
+});
+
+const themeMap = { classic: 0, bioluminescent: 1, fire: 2, green: 3 };
+
+function getUniforms() {
+  return {
+    sensorAngle:     parseFloat(document.getElementById('sensorAngle').value),
+    sensorDistance:   parseFloat(document.getElementById('sensorDistance').value),
+    turnSpeed:        parseFloat(document.getElementById('turnSpeed').value),
+    depositAmount:    parseFloat(document.getElementById('depositAmount').value),
+    decayRate:        parseFloat(document.getElementById('decayRate').value),
+    diffuseStrength:  parseFloat(document.getElementById('diffuseStrength').value),
+    colorTheme:       themeMap[document.getElementById('colorTheme').value] || 0,
+  };
+}
+
+// ─── Render Loop ────────────────────────────────────────────────────────
+function frame() {
+  const uniforms = getUniforms();
+  const read = pingPong;
+  const write = 1 - pingPong;
+
+  // Pass 1: Agent pass — read agentTex[read] -> write agentTex[write]
+  gl.bindFramebuffer(gl.FRAMEBUFFER, agentFbo[write]);
+  gl.viewport(0, 0, SIM_SIZE, SIM_SIZE);
+  gl.useProgram(agentProg);
+  bindQuad(agentProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, agentTex[read]);
+  gl.uniform1i(gl.getUniformLocation(agentProg, 'u_agentTex'), 0);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  // Pass 2: Trail pass — read trailTex[read] -> write trailTex[write]
+  gl.bindFramebuffer(gl.FRAMEBUFFER, trailFbo[write]);
+  gl.viewport(0, 0, SIM_SIZE, SIM_SIZE);
+  gl.useProgram(trailProg);
+  bindQuad(trailProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, trailTex[read]);
+  gl.uniform1i(gl.getUniformLocation(trailProg, 'u_trailTex'), 0);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  // Swap ping-pong
+  pingPong = write;
+
+  // Pass 3: Display — read trailTex[pingPong] (just written) -> screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(displayProg);
+  bindQuad(displayProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, trailTex[pingPong]);
+  gl.uniform1i(gl.getUniformLocation(displayProg, 'u_trailTex'), 0);
+  gl.uniform1i(gl.getUniformLocation(displayProg, 'u_colorTheme'), uniforms.colorTheme);
+  gl.uniform2f(gl.getUniformLocation(displayProg, 'u_simSize'), SIM_SIZE, SIM_SIZE);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
