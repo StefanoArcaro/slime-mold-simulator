@@ -158,6 +158,7 @@
   <button type="button" id="resetBtn">Reset</button>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/twgl.js@6/dist/6.x/twgl-full.min.js"></script>
 <script>
 // ─── Constants ──────────────────────────────────────────────────────────
 const SIM_SIZE = 1024;
@@ -190,88 +191,6 @@ if (!ext) {
 const floatLinear = gl.getExtension('OES_texture_float_linear');
 if (!floatLinear) {
   console.warn('OES_texture_float_linear not available — display may use nearest filtering');
-}
-
-// ─── Utility: Compile Shader Program ────────────────────────────────────
-function createShaderProgram(vertSrc, fragSrc) {
-  const vs = gl.createShader(gl.VERTEX_SHADER);
-  gl.shaderSource(vs, vertSrc);
-  gl.compileShader(vs);
-  if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
-    console.error('Vertex shader error:', gl.getShaderInfoLog(vs));
-    gl.deleteShader(vs);
-    return null;
-  }
-
-  const fs = gl.createShader(gl.FRAGMENT_SHADER);
-  gl.shaderSource(fs, fragSrc);
-  gl.compileShader(fs);
-  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-    console.error('Fragment shader error:', gl.getShaderInfoLog(fs));
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    return null;
-  }
-
-  const prog = gl.createProgram();
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    console.error('Link error:', gl.getProgramInfoLog(prog));
-    gl.deleteProgram(prog);
-    return null;
-  }
-
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-  return prog;
-}
-
-// ─── Utility: Create Float Texture ──────────────────────────────────────
-function createTexture(width, height, data, filter) {
-  const tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(
-    gl.TEXTURE_2D, 0, gl.RGBA32F,
-    width, height, 0,
-    gl.RGBA, gl.FLOAT,
-    data
-  );
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return tex;
-}
-
-// ─── Utility: Create Framebuffer ────────────────────────────────────────
-function createFramebuffer(texture) {
-  const fbo = gl.createFramebuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-  if (status !== gl.FRAMEBUFFER_COMPLETE) {
-    console.error('Framebuffer incomplete:', status);
-  }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  return fbo;
-}
-
-// ─── Full-Screen Quad ───────────────────────────────────────────────────
-const quadVerts = new Float32Array([
-  -1, -1,   1, -1,   -1,  1,
-  -1,  1,   1, -1,    1,  1,
-]);
-const quadVBO = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
-gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
-
-function bindQuad(program) {
-  const loc = gl.getAttribLocation(program, 'a_position');
-  gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 }
 
 // ─── Shared Vertex Shader ───────────────────────────────────────────────
@@ -343,10 +262,15 @@ void main() {
 }
 `;
 
-// ─── Compile Programs ───────────────────────────────────────────────────
-const agentProg   = createShaderProgram(vertSrc, agentFragSrc);
-const trailProg   = createShaderProgram(vertSrc, trailFragSrc);
-const displayProg = createShaderProgram(vertSrc, displayFragSrc);
+// ─── Programs ───────────────────────────────────────────────────────────
+const agentProgInfo   = twgl.createProgramInfo(gl, [vertSrc, agentFragSrc]);
+const trailProgInfo   = twgl.createProgramInfo(gl, [vertSrc, trailFragSrc]);
+const displayProgInfo = twgl.createProgramInfo(gl, [vertSrc, displayFragSrc]);
+
+// ─── Quad Geometry ──────────────────────────────────────────────────────
+const quadBufferInfo = twgl.createBufferInfoFromArrays(gl, {
+  a_position: { numComponents: 2, data: [-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1] },
+});
 
 // ─── Initialize Agent Data ──────────────────────────────────────────────
 function generateAgentData(pattern) {
@@ -430,9 +354,9 @@ let pingPong = 0;
 function initTextures() {
   for (let i = 0; i < 2; i++) {
     if (agentTex[i]) gl.deleteTexture(agentTex[i]);
-    if (agentFbo[i]) gl.deleteFramebuffer(agentFbo[i]);
+    if (agentFbo[i]) gl.deleteFramebuffer(agentFbo[i].framebuffer);
     if (trailTex[i]) gl.deleteTexture(trailTex[i]);
-    if (trailFbo[i]) gl.deleteFramebuffer(trailFbo[i]);
+    if (trailFbo[i]) gl.deleteFramebuffer(trailFbo[i].framebuffer);
   }
 
   const pattern = document.getElementById('spawnPattern').value;
@@ -440,10 +364,27 @@ function initTextures() {
   const trailData = generateTrailData();
 
   for (let i = 0; i < 2; i++) {
-    agentTex[i] = createTexture(SIM_SIZE, SIM_SIZE, i === 0 ? agentData : null, gl.NEAREST);
-    agentFbo[i] = createFramebuffer(agentTex[i]);
-    trailTex[i] = createTexture(SIM_SIZE, SIM_SIZE, i === 0 ? trailData : null, gl.LINEAR);
-    trailFbo[i] = createFramebuffer(trailTex[i]);
+    agentTex[i] = twgl.createTexture(gl, {
+      width: SIM_SIZE, height: SIM_SIZE,
+      src: i === 0 ? agentData : null,
+      internalFormat: gl.RGBA32F,
+      minMag: gl.NEAREST,
+      wrap: gl.CLAMP_TO_EDGE,
+      auto: false,
+    });
+    agentFbo[i] = twgl.createFramebufferInfo(gl,
+      [{ attachment: agentTex[i] }], SIM_SIZE, SIM_SIZE);
+
+    trailTex[i] = twgl.createTexture(gl, {
+      width: SIM_SIZE, height: SIM_SIZE,
+      src: i === 0 ? trailData : null,
+      internalFormat: gl.RGBA32F,
+      minMag: gl.LINEAR,
+      wrap: gl.CLAMP_TO_EDGE,
+      auto: false,
+    });
+    trailFbo[i] = twgl.createFramebufferInfo(gl,
+      [{ attachment: trailTex[i] }], SIM_SIZE, SIM_SIZE);
   }
 
   pingPong = 0;
@@ -497,44 +438,31 @@ function frame() {
   const write = 1 - pingPong;
 
   // Pass 1: Agent pass — read agentTex[read] -> write agentTex[write]
-  gl.bindFramebuffer(gl.FRAMEBUFFER, agentFbo[write]);
-  gl.viewport(0, 0, SIM_SIZE, SIM_SIZE);
-  gl.useProgram(agentProg);
-  bindQuad(agentProg);
-
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, agentTex[read]);
-  gl.uniform1i(gl.getUniformLocation(agentProg, 'u_agentTex'), 0);
-
+  gl.useProgram(agentProgInfo.program);
+  twgl.setBuffersAndAttributes(gl, agentProgInfo, quadBufferInfo);
+  twgl.setUniforms(agentProgInfo, { u_agentTex: agentTex[read] });
+  twgl.bindFramebufferInfo(gl, agentFbo[write]);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
   // Pass 2: Trail pass — read trailTex[read] -> write trailTex[write]
-  gl.bindFramebuffer(gl.FRAMEBUFFER, trailFbo[write]);
-  gl.viewport(0, 0, SIM_SIZE, SIM_SIZE);
-  gl.useProgram(trailProg);
-  bindQuad(trailProg);
-
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, trailTex[read]);
-  gl.uniform1i(gl.getUniformLocation(trailProg, 'u_trailTex'), 0);
-
+  gl.useProgram(trailProgInfo.program);
+  twgl.setBuffersAndAttributes(gl, trailProgInfo, quadBufferInfo);
+  twgl.setUniforms(trailProgInfo, { u_trailTex: trailTex[read] });
+  twgl.bindFramebufferInfo(gl, trailFbo[write]);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
   // Swap ping-pong
   pingPong = write;
 
   // Pass 3: Display — read trailTex[pingPong] (just written) -> screen
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.useProgram(displayProg);
-  bindQuad(displayProg);
-
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, trailTex[pingPong]);
-  gl.uniform1i(gl.getUniformLocation(displayProg, 'u_trailTex'), 0);
-  gl.uniform1i(gl.getUniformLocation(displayProg, 'u_colorTheme'), uniforms.colorTheme);
-  gl.uniform2f(gl.getUniformLocation(displayProg, 'u_simSize'), SIM_SIZE, SIM_SIZE);
-
+  gl.useProgram(displayProgInfo.program);
+  twgl.setBuffersAndAttributes(gl, displayProgInfo, quadBufferInfo);
+  twgl.setUniforms(displayProgInfo, {
+    u_trailTex: trailTex[pingPong],
+    u_colorTheme: uniforms.colorTheme,
+    u_simSize: [SIM_SIZE, SIM_SIZE],
+  });
+  twgl.bindFramebufferInfo(gl, null);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
   requestAnimationFrame(frame);
